@@ -10,8 +10,8 @@ new AwsCdkIssUpdaterStack(app, 'EvoIssUpdater', {
     env: { account: '905418461703', region: 'eu-north-1' },
     applicationPool: 'EvoFunctional',
     iisPath: 'C:\\inetpub\\wwwroot\\EvoFunctional',
-    ec2InstanceId: 'i-0c8a5d8f4d8a1c3c7',
     ec2RoleName: "EC2-EVO-FUNCTIONAL",
+    ec2InstanceId: 'i-0697d5febc4651bdf',
     crossAccountAccountId: '024295479209',
     artifactName: 'HiCommand.zip',
 });

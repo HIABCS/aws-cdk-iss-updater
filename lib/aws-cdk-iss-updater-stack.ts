@@ -8,8 +8,8 @@ interface AwsCdkIssUpdaterStackProps extends cdk.StackProps {
   environment: string; // Example: 'dev', 'prod'
   applicationPool: string; // Name of the IIS application pool
   iisPath: string; // Path to the IIS root folder
-  ec2InstanceId: string; // EC2 instance to target
   ec2RoleName: string; // Name of the EC2 instance role
+  ec2InstanceId: string; // ID of the EC2 instance
   crossAccountAccountId: string; // AWS account ID to grant cross-account permissions
   artifactName: string; // Name of the artifact to deploy
 }
@@ -22,8 +22,8 @@ export class AwsCdkIssUpdaterStack extends cdk.Stack {
       environment,
       applicationPool,
       iisPath,
-      ec2InstanceId,
       ec2RoleName,
+      ec2InstanceId,
       crossAccountAccountId,
       artifactName,
     } = props;
@@ -31,11 +31,8 @@ export class AwsCdkIssUpdaterStack extends cdk.Stack {
     const ssmDocumentName = `HIAB-update-iss-server-${environment}`;
     
     
-    var crossAccountRole = new iam.Role(this, "CrossAccountRole", {
-      assumedBy: new iam.AccountPrincipal(crossAccountAccountId),
-    });
 
-    // 1. Create an S3 Bucket
+    //  Create an S3 Bucket to store deployment artifacts
     const artifactBucket = new s3.Bucket(this, "ArtifactBucket", {
       bucketName: artifactBucketName,
       versioned: true,
@@ -43,59 +40,7 @@ export class AwsCdkIssUpdaterStack extends cdk.Stack {
       autoDeleteObjects: true,
     });
 
-    var buildServerUserArn = cdk.Arn.format({
-      service: "iam",
-      resource: "user",
-      resourceName: "BuildServer-CodeArtifact",
-      region: "eu-central-1",
-      account: "024295479209",
-      partition: "aws",
-    });
-
-
-    // var buildServerUserArn = cdk.Arn.format({
-    //   service: "iam",
-    //   resource: "user",
-    //   resourceName: "BuildServer-CodeArtifact",
-    //   region: "eu-central-1",
-    //   account: "024295479209",
-    //   partition: "aws",
-    // });
-
-
-    // artifactBucket.addToResourcePolicy(new iam.PolicyStatement({
-    //   actions: [
-    //     "s3:MultipartUpload",
-    //     "s3:PutObject",
-    //     "s3:ListBucket",
-    //     "s3:ListObjects",
-    //     "s3:GetObject",
-    //   ],
-    //   resources: [artifactBucket.bucketArn, `${artifactBucket.bucketArn}/*`],
-    //   principals: [new iam.ArnPrincipal(crossAccountRole.roleArn)],
-    // }));
-
-
-      // Grant crossAccountRole permissions to do multipart uploads to the artifact bucket
-      // new iam.Policy(this, "ArtifactBucketPolicy", {
-      //   roles: [crossAccountRole],
-      //   statements: [
-      //     new iam.PolicyStatement({
-      //       actions: [  
-      //         's3:ListMultipartUploadParts',
-      //         's3:AbortMultipartUpload',
-      //         's3:PutObject',
-      //         's3:CreateMultipartUpload',
-      //         's3:List*',
-      //         's3:GetBucket*',
-      //         's3:GetObject*',
-      //       ],
-      //       resources: [artifactBucket.bucketArn, `${artifactBucket.bucketArn}/*`],
-      //     }),
-      //   ],
-      // });
   
-        
 
     // Output the bucket name
     new cdk.CfnOutput(this, "ArtifactBucketName", {
@@ -104,7 +49,7 @@ export class AwsCdkIssUpdaterStack extends cdk.Stack {
     });
 
 
-    //2. Create the SSM Document
+    // Create the SSM Document to update IIS
 
     const ssmScript = `
     $ErrorActionPreference = 'Stop'
@@ -117,6 +62,20 @@ export class AwsCdkIssUpdaterStack extends cdk.Stack {
     $rootPath = "${iisPath}"
     
     try {
+
+        Write-Host 'Copying files from S3...'
+        aws s3 cp "s3://$bucketName/$key" $localPath
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host 'Failed to copy file from S3. Exiting...'
+            exit 1
+        }
+    
+        if (-Not (Test-Path $localPath)) {
+            Write-Host 'File was not downloaded successfully. Exiting...'
+            exit 1
+        }
+        Write-Host "File copied successfully from S3 to $localPath."
+
         Write-Host "Stopping IIS Application Pool: $appPoolName..."
         Stop-WebAppPool -Name $appPoolName -ErrorAction Stop
     
@@ -141,19 +100,6 @@ export class AwsCdkIssUpdaterStack extends cdk.Stack {
         } else {
             Write-Host "Path $rootPath does not exist, skipping removal."
         }
-    
-        Write-Host 'Copying files from S3...'
-        aws s3 cp "s3://$bucketName/$key" $localPath
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host 'Failed to copy file from S3. Exiting...'
-            exit 1
-        }
-    
-        if (-Not (Test-Path $localPath)) {
-            Write-Host 'File was not downloaded successfully. Exiting...'
-            exit 1
-        }
-        Write-Host "File copied successfully from S3 to $localPath."
     
         Write-Host "Extracting files to IIS root folder: $rootPath..."
         Expand-Archive -Path $localPath -DestinationPath $rootPath -Force
@@ -212,7 +158,7 @@ export class AwsCdkIssUpdaterStack extends cdk.Stack {
     }`;
 
 
-    const ssmDocument = new ssm.CfnDocument(this, 'IISDeploymentDocument', {
+    new ssm.CfnDocument(this, 'IISDeploymentDocument', {
       name: ssmDocumentName,
       documentFormat: 'JSON',
       content: {
@@ -232,37 +178,86 @@ export class AwsCdkIssUpdaterStack extends cdk.Stack {
       documentType: 'Command',
     });
 
-    // Output the document name
+    //Output the document name
     new cdk.CfnOutput(this, "SSMDocumentName", {
       value: ssmDocumentName,
       description: "SSM Document name for updating ISS",
     });
 
 
-    //3. Grant S3 permissions to the EC2 instance
+    // Create cross Account role and give s3 permissions
+    var crossAccountRole = new iam.Role(this, "CrossAccountRole", {
+      assumedBy: new iam.AccountPrincipal(crossAccountAccountId),
+    });
 
-    var ec2InstanceRole = iam.Role.fromRoleName(this, "Ec2InstanceRole", ec2RoleName);
+    const s3Actions = [
+      's3:PutObject',
+      's3:AbortMultipartUpload',
+      's3:ListMultipartUploadParts',
+      's3:ListBucket',
+    ];
 
-    artifactBucket.grantRead(ec2InstanceRole);
-    
+    const s3Resources = [
+      artifactBucket.bucketArn,
+      `${artifactBucket.bucketArn}/*`,
+    ];
 
-    // get bucket hiab-mcce-evo-function-p-logging and give ec2RoleName write access
-    var loggingBucket = s3.Bucket.fromBucketName(this, "LoggingBucket", "hiab-mcce-evo-function-p-logging");
-    loggingBucket.grantReadWrite(ec2InstanceRole);
+    const uploadPolicy = new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [...s3Actions,],
+      resources: s3Resources,
+    });
 
-    
+    crossAccountRole.addToPolicy(uploadPolicy);
 
+    artifactBucket.addToResourcePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        principals: [new iam.ArnPrincipal(crossAccountRole.roleArn)],
+        actions: s3Actions,
+        resources: s3Resources,
+      })
+    );
 
-
-    // 4. Grant cross-account role permissions to access the s3 bucket and ssm document
-
-
-    
-
+    // Give Role permission to trigger ssm document
     crossAccountRole.addToPolicy(new iam.PolicyStatement({
       actions: ["ssm:SendCommand"],
-      resources: [`arn:aws:ssm:${this.region}:${this.account}:document/${ssmDocumentName}`],
+      // resources: ["*"],
+      resources: [
+        `arn:aws:ec2:${this.region}:${this.account}:instance/${ec2InstanceId}`,
+        `arn:aws:ssm:${this.region}:${this.account}:document/${ssmDocumentName}`,
+      ],
     }));
+
+    crossAccountRole.addToPolicy(new iam.PolicyStatement({
+      actions: ["ssm:GetCommandInvocation"],
+      resources: [`arn:aws:ssm:${this.region}:${this.account}:*`],
+    }));
+
+    // Attach the policy to the role
+    crossAccountRole.addToPolicy(uploadPolicy);
+  
+    // Grant ec2InstanceRole read access to the artifact bucket
+
+    var ec2InstanceRole = iam.Role.fromRoleName(this, "Ec2InstanceRole", ec2RoleName);
+    artifactBucket.grantRead(ec2InstanceRole);
+
+    var loggingBucket = new s3.Bucket(this, "LoggingBucket", {
+      bucketName: `iss-updater${environment}-${this.account}-ssm-logging`,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: true,
+      //Clean all object after 7 days
+      lifecycleRules: [
+        {
+          expiration: cdk.Duration.days(7),
+        },
+      ]
+    });
+    
+    // get bucket hiab-mcce-evo-function-p-logging and give ec2RoleName write access
+    loggingBucket.grantReadWrite(ec2InstanceRole);
+
+
 
   }
 }
